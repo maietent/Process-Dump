@@ -22,10 +22,22 @@ dump_process::dump_process(DWORD pid, pe_hash_database* db, PD_OPTIONS* options,
 	_db_clean = db;
 
 	// Dump this specified PID into the current directory
-	_ph = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
+	DWORD hijack_source_pid = 0;
+	if (_options->HandleHijack)
+	{
+		_ph = hijack_process_handle(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, &hijack_source_pid, _options->Verbose);
+		if (_ph == NULL)
+		{
+			_ph = hijack_process_handle(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, &hijack_source_pid, _options->Verbose);
+			if (_ph != NULL && _options->Verbose)
+				fprintf(stderr, "WARNING: For PID 0x%x, we had to hijack a handle with fewer permissions than expected. Dropped PROCESS_VM_WRITE and PROCESS_VM_OPERATION.\n", pid);
+		}
+	}
+
+	if (_ph == NULL)
+		_ph = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid);
 	if (_ph == NULL)
 	{
-		// try opening with minimal permissions. This works for most actions (except terminate hooking)
 		_ph = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid);
 		if (_ph != NULL && _options->Verbose)
 			fprintf(stderr, "WARNING: For PID 0x%x, we had to open handle with fewer permissions than expected. Dropped PROCESS_VM_WRITE and PROCESS_VM_OPERATION.\n", pid);
@@ -34,44 +46,53 @@ dump_process::dump_process(DWORD pid, pe_hash_database* db, PD_OPTIONS* options,
 	
 	if( _ph != NULL )
 	{
-		// Try to load the main module name
-		HANDLE hSnapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
-		if(hSnapshot != INVALID_HANDLE_VALUE )
+		_opened = true;
+		HMODULE hMods[2048];
+		DWORD cbNeeded = 0;
+		if (EnumProcessModulesEx(_ph, hMods, sizeof(hMods), &cbNeeded, LIST_MODULES_ALL) && cbNeeded >= sizeof(HMODULE))
 		{
-			_opened = true;
+			MODULEINFO info;
+			if (GetModuleInformation(_ph, hMods[0], &info, sizeof(MODULEINFO)))
+				_address_main_module = (unsigned __int64)info.lpBaseOfDll;
 
-			// Load the main module name
-			MODULEENTRY32 tmpModule;
-			tmpModule.dwSize = sizeof(MODULEENTRY32);
-			if( Module32First(hSnapshot, &tmpModule) )
+			char module_name[MAX_PATH];
+			DWORD module_name_length = GetModuleBaseNameA(_ph, hMods[0], module_name, MAX_PATH);
+			if (module_name_length > 0)
 			{
-				_process_name = new char[wcslen(tmpModule.szModule) + 1];
-				sprintf( _process_name, "%S", tmpModule.szModule );
-
-				// Replace all '.'s in filename with underscores
-				int i = 0;
-				while( _process_name[i] != 0 )
-				{
-					if( _process_name[i] == '.' )
-						_process_name[i] = '_';
-					i++;
-				}
-				
-				_address_main_module = (unsigned __int64) tmpModule.modBaseAddr;
+				_process_name = new char[module_name_length + 1];
+				strcpy_s(_process_name, module_name_length + 1, module_name);
 			}
+		}
 
-			CloseHandle(hSnapshot);
+		if (_process_name == NULL)
+		{
+			char image_path[MAX_PATH];
+			DWORD image_path_length = MAX_PATH;
+			if (QueryFullProcessImageNameA(_ph, 0, image_path, &image_path_length))
+			{
+				char* image_name = strrchr(image_path, '\\');
+				if (image_name == NULL)
+					image_name = image_path;
+				else
+					image_name++;
+
+				_process_name = new char[strlen(image_name) + 1];
+				strcpy_s(_process_name, strlen(image_name) + 1, image_name);
+			}
+		}
+
+		if (_process_name != NULL)
+		{
+			int i = 0;
+			while( _process_name[i] != 0 )
+			{
+				if( _process_name[i] == '.' )
+					_process_name[i] = '_';
+				i++;
+			}
 		}
 		else
 		{
-			if (!_quieter)
-			{
-				if (GetLastError() == 299)
-					fprintf(stderr, "ERROR: Unable to snapshot process PID 0x%x. This can be as a result of the process being a 64 bit process and this tool is running as a 32 bit process, or the process may have not finished being created or already closed.\n", pid);
-				else
-					PrintLastError(L"dump_process CreateToolhelp32Snapshot");
-			}
-
 			_process_name = new char[strlen("unknown")+1];
 			strcpy( _process_name, "unknown" );
 		}
@@ -167,7 +188,7 @@ int dump_process::get_all_hashes(unordered_set<unsigned __int64>* output_hashes,
 		if( !_options->DumpChunks || build_export_list() ) // Only build export list if getting hashes for code chunks
 		{
 			// First build a list of the modules
-			module_list* modules = new module_list( _pid );
+			module_list* modules = new module_list( _pid, _ph );
 			
 			// Set the max address of the target process
 			unsigned __int64 maxAddress = 0;
@@ -224,7 +245,7 @@ int dump_process::get_all_hashes(unordered_set<unsigned __int64>* output_hashes,
 									fprintf( stdout, "INFO: Found MZ header at %llX.\n", base );
 
 								// Bingo, possible MZ file
-								pe_header* header = new pe_header( _pid, (void*) base, modules, _options );
+								pe_header* header = new pe_header( _ph, (void*) base, modules, _options );
 
 								header->process_pe_header();
 								header->process_sections();
@@ -333,7 +354,7 @@ int dump_process::get_all_hashes(unordered_set<unsigned __int64>* output_hashes,
 						output_hashes->insert( chunk_header_hash );
 
 						// Calculate the generic import reference hash as well
-						pe_header* header = new pe_header( _pid, (void*) *it, modules, _options );
+						pe_header* header = new pe_header( _ph, (void*) *it, modules, _options );
 						header->build_pe_header( 0x1000, true, 1 ); // 64bit, only build it with the 1 executable section for performance reasons
 						header->process_sections();
 
@@ -398,12 +419,12 @@ bool dump_process::build_export_list()
 		if (_ph != NULL)
 		{
 			// First build a list of the modules
-			module_list* modules = new module_list(_pid);
+			module_list* modules = new module_list(_pid, _ph);
 
 			// Loop through each of these modules, grabbing their exports
 			for (unordered_map<unsigned __int64, module*>::const_iterator item = modules->_modules.begin(); item != modules->_modules.end(); ++item)
 			{
-				pe_header* header = new pe_header(_pid, (void*) item->first, modules, _options);
+				pe_header* header = new pe_header(_ph, (void*) item->first, modules, _options);
 				if (header->process_pe_header() && header->process_sections() && header->process_export_directory())
 				{
 					// Load it's exports
@@ -433,7 +454,7 @@ bool dump_process::build_export_list(export_list* result, char* library, module_
 		{
 			if (strcmpi(item->second->short_name, library) == 0)
 			{
-				pe_header* header = new pe_header(_pid, (void*)item->first, modules, _options);
+				pe_header* header = new pe_header(_ph, (void*)item->first, modules, _options);
 				if (header->process_pe_header() && header->process_sections() && header->process_export_directory())
 				{
 					// Load its exports
@@ -524,8 +545,8 @@ void dump_process::dump_region(__int64 base)
 		// First build the export list for this process
 		if( !_options->ImportRec || build_export_list() )
 		{
-			module_list* modules = new module_list( _pid );
-			pe_header* header = new pe_header( _pid, (void*) base, modules, _options );
+			module_list* modules = new module_list( _pid, _ph );
+			pe_header* header = new pe_header( _ph, (void*) base, modules, _options );
 			
 			if( _options->ForceGenHeader || !header->process_pe_header() )
 			{
@@ -539,7 +560,7 @@ void dump_process::dump_region(__int64 base)
 
 				if( _options->Verbose )
 					printf( "Generating 64-bit PE header for module at %llX.\n", base );
-				header = new pe_header( _pid, (void*) base, modules, _options );
+				header = new pe_header( _ph, (void*) base, modules, _options );
 				header->build_pe_header(0x1000ffff, false ); 
 				dump_header(header, base, _pid);
 			}
@@ -577,7 +598,7 @@ bool dump_process::monitor_close_start()
 		_term_hook = new terminate_monitor_hook(_ph, _pid, this->is64(), this->_options );
 
 		// Load the exports needed for the hooks
-		module_list* modules = new module_list(_pid);
+		module_list* modules = new module_list(_pid, _ph);
 		export_list* exports = new export_list();
 		build_export_list(exports, "kernel32.dll", modules);
 		build_export_list(exports, "ntdll.dll", modules);
@@ -644,7 +665,7 @@ void dump_process::dump_all()
 		if( build_export_list() )
 		{
 			// First build a list of the modules
-			module_list* modules = new module_list( _pid );
+			module_list* modules = new module_list( _pid, _ph );
 
 			// Set the max address of the target process
 			unsigned __int64 maxAddress = 0;
@@ -698,7 +719,7 @@ void dump_process::dump_all()
 							if (output[0] == 'M' && output[1] == 'Z')
 							{
 								// Bingo, possible MZ file
-								pe_header* header = new pe_header(_pid, (void*)base, modules, _options);
+								pe_header* header = new pe_header(_ph, (void*)base, modules, _options);
 
 								// Use the existing PE header for the dumping
 								if (header->process_pe_header())
@@ -728,12 +749,12 @@ void dump_process::dump_all()
 											{
 												// Use the existing PE header only to get the hash, then generate a PE header for the dumping.
 												fprintf(stdout, "Dumping a module but ignoring existing PE Header for module at 0x%llX.\n", base);
-												pe_header* header_dump = new pe_header(_pid, (void*)base, modules, _options);
+												pe_header* header_dump = new pe_header(_ph, (void*)base, modules, _options);
 												header_dump->build_pe_header(0x1000, true); // 64bit
 												dump_header(header_dump, base, _pid);
 												delete header_dump;
 
-												header_dump = new pe_header(_pid, (void*)base, modules, _options);
+												header_dump = new pe_header(_ph, (void*)base, modules, _options);
 												header_dump->build_pe_header(0x1000, false); // 32bit
 												dump_header(header_dump, base, _pid);
 												delete header_dump;
@@ -809,7 +830,7 @@ void dump_process::dump_all()
 						}
 						
 						// Calculate the generic import reference hash as well
-						pe_header* header = new pe_header( _pid, (void*) *it, modules, _options );
+						pe_header* header = new pe_header( _ph, (void*) *it, modules, _options );
 						header->build_pe_header( 0x1000, true, 1 ); // 64bit, only build it with the 1 executable section for performance reasons
 						header->process_sections();
 
@@ -825,13 +846,13 @@ void dump_process::dump_all()
 							if( header->somewhat_parsed() && import_summary.COUNT_UNIQUE_IMPORT_ADDRESSES >= 2 ) // Require at least 5 imports for dumping
 							{
 								fprintf( stdout, "Dumping unattached executable code chunk from 0x%llX.\n", *it );
-								pe_header* header_dump = new pe_header( _pid, (void*) *it, modules, _options );
+								pe_header* header_dump = new pe_header( _ph, (void*) *it, modules, _options );
 								header_dump->build_pe_header( 0x1000, true ); // 64bit
 								header_dump->set_name("codechunk");
 								dump_header(header_dump, *it, _pid);
 								delete header_dump;
 								
-								header_dump = new pe_header( _pid, (void*) *it, modules, _options );
+								header_dump = new pe_header( _ph, (void*) *it, modules, _options );
 								header_dump->build_pe_header( 0x1000, false ); // 32bit
 								header_dump->set_name("codechunk");
 								dump_header(header_dump, *it, _pid);

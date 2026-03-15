@@ -7,15 +7,20 @@ module_list::module_list()
 	// Empty list
 }
 
-module_list::module_list( DWORD pid )
+module_list::module_list( DWORD pid, HANDLE ph )
 {
 	#if defined(_WIN64)
 	// List modules on a 64 bit machine. A 64 bit machine is assumed to be Windows Vista+
 	HMODULE hMods[2048];
 	DWORD cbNeeded;
     unsigned int i;
-	HANDLE ph = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+	bool close_ph = false;
+	if( ph == NULL )
+	{
+		ph = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
                             FALSE, pid );
+		close_ph = ph != NULL;
+	}
 	if( ph != NULL )
 	{
 		if( EnumProcessModulesEx(ph, hMods, sizeof(hMods), &cbNeeded, LIST_MODULES_ALL))
@@ -42,7 +47,8 @@ module_list::module_list( DWORD pid )
 			}
 		}
 
-		CloseHandle( ph );				
+		if( close_ph )
+			CloseHandle( ph );				
 	}
 	else
 	{

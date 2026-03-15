@@ -62,6 +62,6 @@ class module_list
 public:
 	unordered_map <unsigned __int64, module*> _modules;
 	module_list();
-	module_list( DWORD pid );
+	module_list( DWORD pid, HANDLE ph = NULL );
 	~module_list(void);
 };

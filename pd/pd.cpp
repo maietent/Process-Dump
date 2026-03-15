@@ -422,6 +422,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	options.ImportRec = true;
 	options.ForceGenHeader = false;
 	options.Verbose = false;
+	options.HandleHijack = false;
 	options.EntryPointOverride = -1;
 	options.ReconstructHeaderAsDll = false;
 	options.DumpChunks = true;
@@ -455,6 +456,8 @@ int _tmain(int argc, _TCHAR* argv[])
 			options.ForceReconstructEntryPoint = true;
 		else if (lstrcmp(argv[i], L"-closemon") == 0)
 			flagDumpCloses = true;
+		else if (lstrcmp(argv[i], L"-hh") == 0 || lstrcmp(argv[i], L"-hijack") == 0)
+			options.HandleHijack = true;
 		else if( lstrcmp(argv[i],L"-v") == 0 )
 		{
 			options.Verbose = true;
@@ -813,6 +816,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		printf("\tpd -system\n");
 		printf("\tpd -pid 419\n");
 		printf("\tpd -pid 0x1a3\n");
+		printf("\tpd -pid 0x1a3 -hh\n");
 		printf("\tpd -pid 0x1a3 -a 0x401000 -o c:\\dump\\ -c c:\\dump\\test\\clean.db\n");
 		printf("\tpd -p chrome.exe\n");
 		printf("\tpd -p \"(?i).*chrome.*\"\n");
@@ -825,6 +829,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		printf("\t-p <regex>\tDumps all modules not matching the clean hash database\n\t\t\tfrom the process name found to match the filter into\n\t\t\tspecified pid into the current working directory.\n\n");
 		printf("\t-g\t\tForces generation of PE headers from scratch, ignoring existing headers.\n\n");
 		printf("\t-o <path>\tSets the default output root folder for dumped components.\n\n");
+		printf("\t-hh\t\tAttempts to hijack an existing handle to the target process before calling OpenProcess.\n\n");
 		//printf("\t-log\t\tRuns in log generation mode. No files are dumped, logfiles are generated for analysis. Specify a network path as the output and batch run to generate a report of multiple workstations.\n\n");
 		//printf("\t-netcollect\t\tRuns in network sample collection mode. Specify a network path as the output, dumped files will be organized by hash.\n\n");
 		printf("\t-v\t\tVerbose.\n\n");

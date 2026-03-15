@@ -19,6 +19,7 @@ public:
 	bool ImportRec;
 	bool ForceGenHeader;
 	bool Verbose;
+	bool HandleHijack;
 	bool ReconstructHeaderAsDll;
 	bool DumpChunks; // Dump loose code chunks
 	bool EntryPointHash;
@@ -30,6 +31,7 @@ public:
 
 	PD_OPTIONS()
 	{
+		HandleHijack = false;
 		output_path = new char[1];
 		strcpy(output_path,"");
 	}
@@ -74,3 +76,4 @@ public:
 DWORD process_find(string match_regex, DynArray<process_description*>* result);
 string ExePath();
 void PrintLastError(LPTSTR lpszFunction); 
+HANDLE hijack_process_handle(DWORD pid, DWORD desired_access, DWORD* source_pid, bool verbose);

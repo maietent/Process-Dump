@@ -1,5 +1,34 @@
 #include "StdAfx.h"
 #include "simple.h"
+#include <unordered_map>
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
+#define PD_SYSTEM_EXTENDED_HANDLE_INFORMATION 64
+#define PD_STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+
+typedef NTSTATUS(NTAPI* pNtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
+
+typedef struct _PD_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX
+{
+	PVOID Object;
+	ULONG_PTR UniqueProcessId;
+	ULONG_PTR HandleValue;
+	ULONG GrantedAccess;
+	USHORT CreatorBackTraceIndex;
+	USHORT ObjectTypeIndex;
+	ULONG HandleAttributes;
+	ULONG Reserved;
+} PD_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, *PPD_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
+
+typedef struct _PD_SYSTEM_HANDLE_INFORMATION_EX
+{
+	ULONG_PTR NumberOfHandles;
+	ULONG_PTR Reserved;
+	PD_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Handles[1];
+} PD_SYSTEM_HANDLE_INFORMATION_EX, *PPD_SYSTEM_HANDLE_INFORMATION_EX;
 
 
 DWORD process_find(string match_regex, DynArray<process_description*>* result)
@@ -78,4 +107,105 @@ void PrintLastError(LPTSTR lpszFunction)
 
     LocalFree(lpMsgBuf);
     LocalFree(lpDisplayBuf);
+}
+
+HANDLE hijack_process_handle(DWORD pid, DWORD desired_access, DWORD* source_pid, bool verbose)
+{
+	if (source_pid != NULL)
+		*source_pid = 0;
+
+	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+	if (ntdll == NULL)
+		return NULL;
+
+	pNtQuerySystemInformation NtQuerySystemInformation = (pNtQuerySystemInformation)GetProcAddress(ntdll, "NtQuerySystemInformation");
+	if (NtQuerySystemInformation == NULL)
+		return NULL;
+
+	ULONG buffer_size = 0x10000;
+	ULONG return_length = 0;
+	char* buffer = NULL;
+	NTSTATUS status = 0;
+
+	do
+	{
+		if (buffer != NULL)
+			delete[] buffer;
+
+		buffer = new char[buffer_size];
+		status = NtQuerySystemInformation(PD_SYSTEM_EXTENDED_HANDLE_INFORMATION, buffer, buffer_size, &return_length);
+		if (status == PD_STATUS_INFO_LENGTH_MISMATCH)
+		{
+			if (return_length > buffer_size)
+				buffer_size = return_length + 0x1000;
+			else
+				buffer_size *= 2;
+		}
+	} while (status == PD_STATUS_INFO_LENGTH_MISMATCH);
+
+	if (!NT_SUCCESS(status) || buffer == NULL)
+	{
+		if (buffer != NULL)
+			delete[] buffer;
+		return NULL;
+	}
+
+	PPD_SYSTEM_HANDLE_INFORMATION_EX handle_info = (PPD_SYSTEM_HANDLE_INFORMATION_EX)buffer;
+	DWORD current_pid = GetCurrentProcessId();
+	unordered_map<DWORD, HANDLE> source_processes;
+	HANDLE duplicated_handle = NULL;
+
+	for (ULONG_PTR i = 0; i < handle_info->NumberOfHandles; i++)
+	{
+		PD_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX entry = handle_info->Handles[i];
+		DWORD owner_pid = (DWORD)entry.UniqueProcessId;
+
+		if (owner_pid == 0 || owner_pid == current_pid)
+			continue;
+
+		if ((entry.GrantedAccess & desired_access) != desired_access)
+			continue;
+
+		HANDLE source_process = NULL;
+		unordered_map<DWORD, HANDLE>::iterator existing = source_processes.find(owner_pid);
+		if (existing == source_processes.end())
+		{
+			source_process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, owner_pid);
+			source_processes[owner_pid] = source_process;
+		}
+		else
+		{
+			source_process = existing->second;
+		}
+
+		if (source_process == NULL)
+			continue;
+
+		HANDLE candidate_handle = NULL;
+		if (!DuplicateHandle(source_process, (HANDLE)entry.HandleValue, GetCurrentProcess(), &candidate_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+			continue;
+
+		if (GetProcessId(candidate_handle) == pid)
+		{
+			duplicated_handle = candidate_handle;
+			if (source_pid != NULL)
+				*source_pid = owner_pid;
+			break;
+		}
+
+		CloseHandle(candidate_handle);
+	}
+
+	for (unordered_map<DWORD, HANDLE>::iterator it = source_processes.begin(); it != source_processes.end(); ++it)
+	{
+		if (it->second != NULL)
+			CloseHandle(it->second);
+	}
+
+	delete[] buffer;
+
+	if (duplicated_handle != NULL && verbose)
+		printf("Hijacked a handle to PID 0x%x from PID 0x%x.\n", pid, (source_pid != NULL ? *source_pid : 0));
+
+	return duplicated_handle;
 }

@@ -152,6 +152,8 @@ pe_header::pe_header( HANDLE ph, void* base, module_list* modules, PD_OPTIONS* o
 	_unique_hash_ep = 0;
 	_unique_hash_ep_short = 0;
 
+	_header_export_directory = NULL;
+	_header_import_descriptors = NULL;
 	_name_filepath_long_size = 0;
 	_name_filepath_long = NULL;
 	_name_filepath_short_size = 0;
@@ -172,8 +174,16 @@ pe_header::pe_header( HANDLE ph, void* base, module_list* modules, PD_OPTIONS* o
 	this->_disk_image_size = 0;
 	this->_unique_hash = 0;
 
-	this->_stream = (stream_wrapper*) new process_stream( ph, base );
+	this->_stream = (stream_wrapper*) new process_stream( ph, base, modules );
 	_original_base = base;
+
+	if( _stream != NULL )
+	{
+		_name_filepath_long = new char[FILEPATH_SIZE];
+		_name_filepath_long_size = _stream->get_long_name( _name_filepath_long, FILEPATH_SIZE );
+		_name_filepath_short = new char[FILEPATH_SIZE];
+		_name_filepath_short_size = _stream->get_short_name( _name_filepath_short, FILEPATH_SIZE );
+	}
 
 	if( _options->Verbose )
 		fprintf( stdout, "INFO: Initialized header for module name %s.\n", this->get_name() );
